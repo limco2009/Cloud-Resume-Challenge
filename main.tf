@@ -10,7 +10,7 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-east-1" # Required for both CloudFront ACM certificates and CloudFront WAF
+  region = "us-east-1" # Required for CloudFront ACM certificates
 }
 
 variable "domain_name" {
@@ -172,72 +172,7 @@ resource "aws_s3_object" "static_assets" {
 }
 
 # ==============================================================================
-# 4. EDGE SECURITY: AWS WAF IP RATE-LIMITING FOR CLOUDFRONT
-# ==============================================================================
-resource "aws_wafv2_web_acl" "cdn_waf" {
-  name        = "website-waf-${random_id.bucket_suffix.hex}"
-  description = "Rate limits abusive IPs and blocks common web exploits"
-  scope       = "CLOUDFRONT" # Must be CLOUDFRONT and deployed in us-east-1
-
-  default_action {
-    allow {}
-  }
-
-  # Rule 1: IP Rate-Based Rule (Blocks IPs exceeding 100 requests in 5 minutes)
-  rule {
-    name     = "RateLimitPerIP"
-    priority = 1
-
-    action {
-      block {}
-    }
-
-    statement {
-      rate_based_statement {
-        limit              = 100 # Minimum allowed by AWS WAF is 100 requests per 5 mins
-        aggregate_key_type = "IP"
-      }
-    }
-
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "RateLimitPerIPMetric"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  # Rule 2: AWS Managed IP Reputation List (Blocks known malicious bot IPs)
-  rule {
-    name     = "AWSManagedRulesAmazonIpReputationList"
-    priority = 2
-
-    override_action {
-      none {}
-    }
-
-    statement {
-      managed_rule_group_statement {
-        name        = "AWSManagedRulesAmazonIpReputationList"
-        vendor_name = "AWS"
-      }
-    }
-
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "AWSIpReputationMetric"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  visibility_config {
-    cloudwatch_metrics_enabled = true
-    metric_name                = "WebsiteWAFMetric"
-    sampled_requests_enabled   = true
-  }
-}
-
-# ==============================================================================
-# 5. CDN: CLOUDFRONT DISTRIBUTION (ATTACHED TO WAF & ACM)
+# 4. CDN: CLOUDFRONT DISTRIBUTION (COMPATIBLE WITH $0/MO FLAT-RATE FREE PLAN)
 # ==============================================================================
 resource "aws_cloudfront_origin_access_control" "s3_oac" {
   name                              = "s3-oac-${random_id.bucket_suffix.hex}"
@@ -250,7 +185,11 @@ resource "aws_cloudfront_distribution" "cdn" {
   enabled             = true
   default_root_object = "index.html"
   aliases             = [var.domain_name]
-  web_acl_id          = aws_wafv2_web_acl.cdn_waf.arn # Attach WAF to CloudFront
+
+  # Prevents Terraform from removing the bundled WAF managed by the $0 Free Plan
+  lifecycle {
+    ignore_changes = [web_acl_id]
+  }
 
   origin {
     domain_name              = aws_s3_bucket.website_bucket.bucket_regional_domain_name
@@ -338,7 +277,7 @@ resource "terraform_data" "invalidate_cache" {
 }
 
 # ==============================================================================
-# 6. OUTPUTS
+# 5. OUTPUTS
 # ==============================================================================
 output "godaddy_step1_acm_validation_records" {
   description = "Add this CNAME record in GoDaddy to validate your SSL certificate"
@@ -364,6 +303,3 @@ output "live_website_url" {
   description = "Your live custom domain URL"
   value       = "https://${var.domain_name}"
 }
-
-
-# ==============================================================================
